@@ -23,6 +23,30 @@ Math.legacyRound = (number: number, points: number = 0): number => {
     return Math.floor((number * p) + Math.copySign(0.5, number)) / p;
 };
 
+const cmuDict: any = (() => {
+  try {
+    /* npm package that exports an object mapping words -> pronunciations.
+       Install with: npm i cmu-pronouncing-dictionary
+       If you prefer another CMU package, adapt this require accordingly. */
+    // @ts-ignore
+    return require('cmu-pronouncing-dictionary');
+  } catch (e) {
+    return {};
+  }
+})();
+
+let hyphenator: any = null;
+try {
+  // Hypher + english patterns - install with: npm i hypher hyphenation.en-us
+  // @ts-ignore
+  const Hypher = require('hypher');
+  // @ts-ignore
+  const enUS = require('hyphenation.en-us');
+  hyphenator = new Hypher(enUS);
+} catch (e) {
+  hyphenator = null;
+}
+
 class Readability {
 
     /**
@@ -90,11 +114,30 @@ class Readability {
      * @param {boolean} [removePunctuation=true] - Whether to ignore punctuation.
      * @returns {number} The word count.
      */
+    /* Replace the existing lexiconCount(...) implementation with this (textstat-like):
+   - preserves apostrophes in words (so "don't" remains one token)
+   - removes other punctuation
+   - replaces hyphens with a space (textstat removes hyphens)
+   - splits on whitespace (\s+) */
     lexiconCount(text: string, removePunctuation: boolean = true): number {
-        if (removePunctuation) text = this.removePunctuation(text);
-        // text = text.split(/,| |\n|\r/g);
-        // text = text.filter(n => n);
-        return text.split(/,| |\n|\r/g).filter(n => n).length;
+        if (!text) return 0;
+    
+        // Normalize line endings
+        text = text.replace(/\r/g, ' ');
+    
+        if (removePunctuation) {
+            // Normalize unicode apostrophes to ASCII apostrophe so they are preserved
+            text = text.replace(/[\u2018\u2019\u201B\u2032]/g, "'");
+            // Replace hyphens with space (textstat removes hyphens / optionally splits them)
+            text = text.replace(/-/g, ' ');
+            // Remove punctuation except apostrophes and whitespace and word-chars.
+            // This mirrors textstat's remove_punctuation(..., rm_apostrophe=False) behavior.
+            text = text.replace(/[^\w\s']/g, '');
+        }
+    
+        // Split on any whitespace sequence (more robust than splitting only on spaces/comma)
+        const tokens = text.trim().length ? text.trim().split(/\s+/).filter(Boolean) : [];
+        return tokens.length;
     }
 
     /**
@@ -103,15 +146,82 @@ class Readability {
      * @param {string} [lang='en-US'] - The language of the text.
      * @returns {number} The syllable count.
      */
+    /* Replace the existing syllableCount(...) implementation with this:
+   Behavior:
+   - Lowercases text.
+   - Splits into word tokens (keeps apostrophes inside tokens).
+   - For each token:
+     - Try CMU lookup first (counts numeric stress markers as syllables).
+     - Fallback to hyphenation (Hypher) if no CMU entry.
+     - As last resort, fall back to a minimal heuristic (count vowels groups) to avoid returning 0.
+   This mirrors textstat's cmudict + pyphen behavior. */
     syllableCount(text: string, lang: string = 'en-US'): number {
-        text = text.toLocaleLowerCase(lang);
-        text = this.removePunctuation(text);
         if (!text) return 0;
-        // eventually replace syllable
-        const count = syllable(text);
-        return count;
+    
+        // Normalize text
+        let lc = text.toLowerCase();
+        // Keep apostrophes inside words (do not strip them here)
+        // Replace Unicode apostrophes with ASCII apostrophe for consistency
+        lc = lc.replace(/[\u2018\u2019\u201B\u2032]/g, "'");
+    
+        // Get tokens similar to textstat's list_words(..., lowercase=True)
+        // Match words containing letters/digits/underscore and internal apostrophes
+        const wordMatches: RegExpMatchArray | null = lc.match(/[\w']+/g);
+        if (!wordMatches) return 0;
+    
+        let total = 0;
+    
+        for (let raw of wordMatches) {
+            let word = raw.replace(/^'+|'+$/g, ''); // trim leading/trailing apostrophes
+            if (!word) continue;
+    
+            const key = word.toLowerCase();
+    
+            // 1) Try CMU lookup (dictionary pronouncing entries)
+            try {
+                const entry = (cmuDict && cmuDict[key]) || null;
+                if (entry) {
+                    /* cmu packages differ in shape:
+                       - Could be an array of strings (pronunciations) like ["AH0 B ..."]
+                       - Could be an array-of-arrays or object. We'll handle common cases.
+                    */
+                    let pron = entry;
+                    if (Array.isArray(pron) && pron.length > 0) pron = pron[0];
+                    const phonesStr = Array.isArray(pron) ? pron.join(' ') : String(pron);
+                    const stressDigits = phonesStr.match(/\d/g);
+                    const syllablesFromCmu = stressDigits ? stressDigits.length : 0;
+                    if (syllablesFromCmu > 0) {
+                        total += syllablesFromCmu;
+                        continue; // done with this word
+                    }
+                    // if cmu found but couldn't determine digits, fall through to hyphenator
+                }
+            } catch (e) {
+                // ignore and try fallback
+            }
+    
+            // 2) Fallback: hyphenation (Hypher)
+            try {
+                if (hyphenator) {
+                    const parts = hyphenator.hyphenate(word);
+                    if (parts && parts.length > 0) {
+                        total += parts.length;
+                        continue;
+                    }
+                }
+            } catch (e) {
+                // ignore and try final fallback
+            }
+    
+            // 3) Final fallback heuristic (simple vowel-group counting) - keeps a floor of 1 per word
+            const cleaned = word.replace(/[^a-z]/g, '');
+            const vowelGroups = cleaned.match(/[aeiouy]+/g);
+            const syllGuess = vowelGroups ? vowelGroups.length : 1;
+            total += Math.max(1, syllGuess);
+        }
+    
+        return total;
     }
-
     /**
      * Returns the number of sentences present in the given text.
      * @param {string} text - The text to count the sentences of.
