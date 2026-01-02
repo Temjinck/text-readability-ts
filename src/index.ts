@@ -117,15 +117,26 @@ class Readability {
      * @param {string} text - The text to count the sentences of.
      * @returns {number} The sentence count.
      */
-    sentenceCount(text: string): number {
-        let ignoreCount: number = 0;
-        let sentences: string[] = text.split(/ *[.?!]['")\]]*[ |\n](?=[A-Z])/g);
-        for (let sentence of sentences) {
-            if (this.lexiconCount(sentence) <= 2) ignoreCount += 1;
-        }
-        const validSentences: number = sentences.length - ignoreCount;
-        return validSentences > 1 ? validSentences : 1;
+    // updated sentenceCount to match textStat's version
+   sentenceCount(text: string): number {
+    // Match textstat behaviour:
+    // - empty string -> 0
+    // - otherwise find sentence-like spans with a permissive regex
+    // - ignore fragments with <= 2 words
+    // - return at least 1 for non-empty input
+    if (!text || text.length === 0) return 0;
+
+    let ignoreCount: number = 0;
+    // Use a pattern equivalent to textstat's r"\b[^.!?]+[.!?]*"
+    const sentences: RegExpMatchArray | null = text.match(/\b[^.!?]+[.!?]*/g);
+    const sentenceList: string[] = sentences ? Array.from(sentences) : [];
+
+    for (let sentence of sentenceList) {
+        if (this.lexiconCount(sentence) <= 2) ignoreCount += 1;
     }
+
+    return Math.max(1, sentenceList.length - ignoreCount);
+}
 
     /**
      * Returns the average sentence length of the given text.
